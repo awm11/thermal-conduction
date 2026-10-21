@@ -1,20 +1,21 @@
-// Particle model of thermal conduction in a metal.
+// Model of thermal conduction in a metal, after the DoITPoMS "Thermal
+// conduction in metals" simulation.
 //
-// Ions sit on springs about fixed lattice sites, so their thermal energy is
-// genuine vibration (kinetic + spring potential energy). Free electrons fly
-// between them and bounce elastically off whichever ion they hit, exchanging
-// momentum with the moving ion. Nothing else couples the ions, so the only way
-// energy can travel from a hot ion to a distant cold one is by being carried
-// across by electrons.
+// Every ion and every free electron carries an amount of heat, shown as its
+// temperature. Ions sit at fixed lattice sites and vibrate more when they are
+// hotter. Electrons fly between them at a steady speed. When an electron hits
+// an ion they share their heat equally (both end up at the average of the two
+// temperatures) and the electron bounces off in a new direction. Heat is
+// never created or destroyed in a collision, and the ions never touch each
+// other, so electrons are the only way heat can travel along the bar.
 //
 // The hot source and cold sink are extra columns of ions at the two ends of
 // the metal, in thermal contact with it: electrons wander in and out of them
-// just as they do between any other columns. Each of their ions is kept at a
-// fixed temperature (its vibration energy is continually nudged back to the
-// held value), standing in for a large heater or cooler behind it. The energy
-// those nudges add or remove is the heat flow.
+// just as they do between any other columns. A heater or cooler holds their
+// ions at a fixed temperature; the heat it has to add or remove to do so is
+// the heat flow.
 //
-// Units: lengths in stage pixels, time in seconds, electron mass = 1.
+// Units: lengths in stage pixels, time in seconds, temperatures in kelvin.
 
 export const SPACING = 84;
 export const ROWS = 8;
@@ -28,60 +29,45 @@ export const LATTICE_Y = 116;
 export const LATTICE_WIDTH = TOTAL_COLUMNS * SPACING;
 export const LATTICE_HEIGHT = (ROWS + 0.5) * SPACING;
 
-// Ions are drawn at exactly the size electrons bounce off. This radius keeps
-// the electrons' mean free path under one ion spacing; with much smaller ions
-// the electrons mix the whole bar so thoroughly that almost all of the
-// temperature drop happens right at the ends.
+// Ions are drawn at exactly the size electrons bounce off.
 export const ION_RADIUS = 24;
 export const ELECTRON_RADIUS = 4.6;
 const CONTACT_DISTANCE = ION_RADIUS + ELECTRON_RADIUS;
 const CONTACT_DISTANCE_SQ = CONTACT_DISTANCE * CONTACT_DISTANCE;
 
-// Temperatures in kelvin. Displayed in °C.
 export const KELVIN_OFFSET = 273;
 export const ROOM_TEMP = 293; // 20 °C
 export const SOURCE_TEMP = 573; // 300 °C
 export const SINK_TEMP = 223; // −50 °C
 
-// Energy per kelvin (Boltzmann constant in simulation units). Chosen so an
-// electron at room temperature moves at roughly 150 px/s.
-const K_B = 38;
-const ELECTRON_MASS = 1;
-const ION_MASS = 8;
-// Spring stiffness chosen so an ion at room temperature jiggles ~3 px.
-const ION_SPRING = 1250;
-const ION_OMEGA = Math.sqrt(ION_SPRING / ION_MASS);
+// Electrons all move at about this speed, whatever their temperature; their
+// glow, not their speed, shows how much heat they carry.
+const ELECTRON_SPEED = 170;
+const ELECTRON_SPEED_SPREAD = 0.25;
+// After a collision an electron leaves within this angle of straight out
+// from the ion, so it never sticks and its path is randomised.
+const SCATTER_HALF_ANGLE = Math.PI / 3;
+// Each collision moves this fraction of the temperature difference: 0.5 means
+// electron and ion both end at their average, as in the DoITPoMS model.
+const HEAT_SHARE = 0.5;
 
-// Electrons move at most a few pixels per substep, far less than the contact
-// distance, so collisions are never skipped.
+// Ion vibration: amplitude grows with temperature (amplitude² ∝ T).
+const VIBRATION_AT_ROOM = 3.4;
+
 const MAX_SUBSTEP = 1 / 120;
-const THERMOSTAT_TIME_S = 0.12; // how quickly source/sink ions are pulled back to their held temperature
-// A column's displayed temperature is averaged over roughly this many recent
-// collisions in it. The average only moves when collisions actually happen,
-// so with no electrons nothing on screen can drift.
-const COLUMN_SMOOTHING_COLLISIONS = 100;
-const ELECTRON_SMOOTHING_S = 4;
-const POWER_SMOOTHING_S = 30;
+const POWER_SMOOTHING_S = 6;
 const POWER_SAMPLE_S = 0.25;
 export const HISTORY_SECONDS = 120;
 const HISTORY_SAMPLE_S = 0.5;
 
 // Heat flow is shown in arbitrary units scaled to tidy numbers.
-export const POWER_UNIT = K_B * 100;
+const POWER_UNIT = 100;
 export const POWER_AVERAGE_SECONDS = POWER_SMOOTHING_S;
 
 export const MAX_ELECTRONS = 600;
 export const DEFAULT_ELECTRONS = 150;
 
 export const toCelsius = (kelvin) => kelvin - KELVIN_OFFSET;
-
-function gaussian() {
-  let u = 0;
-  let v = 0;
-  while (u === 0) u = Math.random();
-  while (v === 0) v = Math.random();
-  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
-}
 
 export function columnX(column) {
   return LATTICE_X + SPACING / 2 + column * SPACING;
@@ -100,84 +86,62 @@ export function domainBounds(state) {
   };
 }
 
-function ionEnergy(ion) {
-  return (
-    0.5 * ION_MASS * (ion.vx * ion.vx + ion.vy * ion.vy) +
-    0.5 * ION_SPRING * (ion.dx * ion.dx + ion.dy * ion.dy)
-  );
-}
-
-function thermaliseIon(ion, temperature) {
-  // Give the ion exactly the average energy for this temperature (2kT for a 2D
-  // oscillator), split randomly between the two directions and with random
-  // phase, so every column starts at the stated temperature rather than at a
-  // noisy random sample of it.
-  const energy = 2 * K_B * temperature;
-  const share = 0.25 + Math.random() * 0.5;
-  for (const [energyHere, axis] of [
-    [energy * share, "x"],
-    [energy * (1 - share), "y"],
-  ]) {
-    const amplitude = Math.sqrt((2 * energyHere) / ION_SPRING);
-    const phase = Math.random() * Math.PI * 2;
-    ion[`d${axis}`] = amplitude * Math.cos(phase);
-    ion[`v${axis}`] = -amplitude * ION_OMEGA * Math.sin(phase);
-  }
-  ion.temperature = temperature;
-}
-
 function makeColumn(column, temperature) {
   const ions = [];
   for (let row = 0; row < ROWS; row += 1) {
-    const ion = {
+    ions.push({
       column,
       row,
       restX: columnX(column),
       restY: siteY(column, row),
       dx: 0,
       dy: 0,
-      vx: 0,
-      vy: 0,
+      // Each ion vibrates in its own slightly different elliptical pattern.
+      freqX: 2 * Math.PI * (1.6 + Math.random() * 0.8),
+      freqY: 2 * Math.PI * (1.6 + Math.random() * 0.8),
+      phaseX: Math.random() * 2 * Math.PI,
+      phaseY: Math.random() * 2 * Math.PI,
       temperature,
-    };
-    thermaliseIon(ion, temperature);
-    ions.push(ion);
+    });
   }
   return ions;
 }
 
-function setElectronVelocity(electron, temperature) {
-  const spread = Math.sqrt((K_B * temperature) / ELECTRON_MASS);
-  electron.vx = gaussian() * spread;
-  electron.vy = gaussian() * spread;
-}
-
 export function electronTemperature(electron) {
-  // In two dimensions the mean kinetic energy of a free particle is kT.
-  return (0.5 * ELECTRON_MASS * (electron.vx * electron.vx + electron.vy * electron.vy)) / K_B;
+  return electron.temperature;
 }
 
 function columnOfX(x) {
   return Math.max(0, Math.min(TOTAL_COLUMNS - 1, Math.floor((x - LATTICE_X) / SPACING)));
 }
 
-function localTemperature(state, x) {
-  const t = state.columnIonTemp[columnOfX(x)];
-  return Number.isFinite(t) ? t : ROOM_TEMP;
+function heldTemperature(column) {
+  if (column === SOURCE_COLUMN) return SOURCE_TEMP;
+  if (column === SINK_COLUMN) return SINK_TEMP;
+  return null;
 }
 
-function spawnElectron(state) {
+function spawnElectron(state, metalTemp) {
   const bounds = domainBounds(state);
   for (let attempt = 0; attempt < 200; attempt += 1) {
     const x = bounds.left + ELECTRON_RADIUS + Math.random() * (bounds.right - bounds.left - 2 * ELECTRON_RADIUS);
     const y = bounds.top + ELECTRON_RADIUS + Math.random() * (bounds.bottom - bounds.top - 2 * ELECTRON_RADIUS);
     const clear = state.ions.every(
-      (ion) => Math.hypot(ion.restX - x, ion.restY - y) > CONTACT_DISTANCE + 6,
+      (ion) => Math.hypot(ion.restX - x, ion.restY - y) > CONTACT_DISTANCE + 8,
     );
     if (!clear) continue;
-    const electron = { x, y, vx: 0, vy: 0, id: state.nextElectronId++ };
-    setElectronVelocity(electron, localTemperature(state, x));
-    return electron;
+    const speed = ELECTRON_SPEED * (1 + (Math.random() * 2 - 1) * ELECTRON_SPEED_SPREAD);
+    const angle = Math.random() * 2 * Math.PI;
+    // New electrons start at the temperature of whatever they appear in, so
+    // adding electrons never heats or cools the bar.
+    const held = heldTemperature(columnOfX(x));
+    return {
+      x,
+      y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      temperature: held ?? metalTemp,
+    };
   }
   return null;
 }
@@ -198,9 +162,9 @@ export function createState(electronCount = DEFAULT_ELECTRONS) {
     sourceOn: false,
     sinkOn: false,
     time: 0,
-    nextElectronId: 0,
-    columnIonTemp: new Array(TOTAL_COLUMNS).fill(ROOM_TEMP),
-    columnElectronTemp: new Array(TOTAL_COLUMNS).fill(ROOM_TEMP),
+    ionGrid: [],
+    columnIonTemp: new Array(TOTAL_COLUMNS).fill(NaN),
+    columnElectronTemp: new Array(TOTAL_COLUMNS).fill(NaN),
     sourceEnergy: 0,
     sinkEnergy: 0,
     powerSampleTime: 0,
@@ -208,33 +172,15 @@ export function createState(electronCount = DEFAULT_ELECTRONS) {
     sinkPower: 0,
     history: [],
     historySampleTime: 0,
-    ionGrid: [],
-    columnHits: new Array(TOTAL_COLUMNS).fill(0),
   };
   for (let column = 1; column <= METAL_COLUMNS; column += 1) {
     state.ions.push(...makeColumn(column, ROOM_TEMP));
   }
   rebuildIonGrid(state);
   setElectronCount(state, electronCount);
+  vibrateIons(state);
+  updateMeasurements(state, 0);
   return state;
-}
-
-// Random speeds give a batch of electrons slightly too much or too little
-// energy overall. Scale the batch so its total kinetic energy is exactly what
-// its temperatures call for, so adding electrons never heats or cools the bar.
-function matchBatchEnergy(electrons, temperatureOf) {
-  let actual = 0;
-  let target = 0;
-  for (const electron of electrons) {
-    actual += 0.5 * ELECTRON_MASS * (electron.vx * electron.vx + electron.vy * electron.vy);
-    target += K_B * temperatureOf(electron);
-  }
-  if (actual <= 0) return;
-  const scale = Math.sqrt(target / actual);
-  for (const electron of electrons) {
-    electron.vx *= scale;
-    electron.vy *= scale;
-  }
 }
 
 export function setElectronCount(state, count) {
@@ -242,22 +188,13 @@ export function setElectronCount(state, count) {
   while (state.electrons.length > target) {
     state.electrons.splice(Math.floor(Math.random() * state.electrons.length), 1);
   }
-  // Electrons added inside the metal start at its current temperature (and
-  // any landing in the source or sink at that end's temperature), so adding
-  // electrons never changes how hot the bar is.
   const metal = metalTemperature(state);
-  const added = [];
   while (state.electrons.length < target) {
-    const electron = spawnElectron(state);
+    const electron = spawnElectron(state, metal);
     if (!electron) break;
     state.electrons.push(electron);
-    added.push(electron);
   }
-  matchBatchEnergy(added, (electron) => {
-    const column = columnOfX(electron.x);
-    if (column === SOURCE_COLUMN || column === SINK_COLUMN) return localTemperature(state, electron.x);
-    return metal;
-  });
+  updateMeasurements(state, 0);
 }
 
 function keepElectronsInside(state) {
@@ -273,100 +210,54 @@ function keepElectronsInside(state) {
   }
 }
 
-function setReservoir(state, column, on, temperature) {
+function setReservoir(state, column, on) {
   state.ions = state.ions.filter((ion) => ion.column !== column);
-  if (on) state.ions.push(...makeColumn(column, temperature));
+  if (on) state.ions.push(...makeColumn(column, heldTemperature(column)));
   rebuildIonGrid(state);
-  state.columnIonTemp[column] = on ? temperature : NaN;
-  state.columnElectronTemp[column] = on ? state.columnElectronTemp[column] || temperature : NaN;
+  keepElectronsInside(state);
+  vibrateIons(state);
+  updateMeasurements(state, 0);
 }
 
 export function setSource(state, on) {
   state.sourceOn = on;
-  setReservoir(state, SOURCE_COLUMN, on, SOURCE_TEMP);
-  keepElectronsInside(state);
+  setReservoir(state, SOURCE_COLUMN, on);
   if (!on) state.sourcePower = 0;
 }
 
 export function setSink(state, on) {
   state.sinkOn = on;
-  setReservoir(state, SINK_COLUMN, on, SINK_TEMP);
-  keepElectronsInside(state);
+  setReservoir(state, SINK_COLUMN, on);
   if (!on) state.sinkPower = 0;
 }
 
 export function resetTemperatures(state) {
   for (const ion of state.ions) {
-    if (ion.column === SOURCE_COLUMN) thermaliseIon(ion, SOURCE_TEMP);
-    else if (ion.column === SINK_COLUMN) thermaliseIon(ion, SINK_TEMP);
-    else thermaliseIon(ion, ROOM_TEMP);
-  }
-  for (let column = 1; column <= METAL_COLUMNS; column += 1) {
-    state.columnIonTemp[column] = ROOM_TEMP;
-    state.columnElectronTemp[column] = ROOM_TEMP;
+    ion.temperature = heldTemperature(ion.column) ?? ROOM_TEMP;
   }
   for (const electron of state.electrons) {
-    setElectronVelocity(electron, ROOM_TEMP);
+    electron.temperature = heldTemperature(columnOfX(electron.x)) ?? ROOM_TEMP;
   }
-  matchBatchEnergy(state.electrons, () => ROOM_TEMP);
   state.sourcePower = 0;
   state.sinkPower = 0;
   state.sourceEnergy = 0;
   state.sinkEnergy = 0;
   state.history = [];
+  updateMeasurements(state, 0);
 }
 
-function moveIons(state, dt) {
-  const c = Math.cos(ION_OMEGA * dt);
-  const s = Math.sin(ION_OMEGA * dt);
+function vibrateIons(state) {
+  const t = state.time;
   for (const ion of state.ions) {
-    // Exact solution for simple harmonic motion, so springs never gain or lose energy.
-    const dx = ion.dx;
-    const dy = ion.dy;
-    ion.dx = dx * c + (ion.vx / ION_OMEGA) * s;
-    ion.vx = -dx * ION_OMEGA * s + ion.vx * c;
-    ion.dy = dy * c + (ion.vy / ION_OMEGA) * s;
-    ion.vy = -dy * ION_OMEGA * s + ion.vy * c;
+    const amplitude = VIBRATION_AT_ROOM * Math.sqrt(Math.max(0, ion.temperature) / ROOM_TEMP);
+    ion.dx = amplitude * Math.sin(ion.freqX * t + ion.phaseX);
+    ion.dy = amplitude * Math.sin(ion.freqY * t + ion.phaseY);
   }
-}
-
-function applyThermostats(state, dt) {
-  if (!state.sourceOn && !state.sinkOn) return;
-  const blend = smoothingFactor(dt, THERMOSTAT_TIME_S);
-  for (const ion of state.ions) {
-    const isSource = ion.column === SOURCE_COLUMN;
-    const isSink = ion.column === SINK_COLUMN;
-    if (!isSource && !isSink) continue;
-    // Pull each source/sink ion's vibration energy smoothly back towards the
-    // held temperature. The energy this adds or removes is the heat supplied
-    // by the heater or taken away by the cooler.
-    const target = 2 * K_B * (isSource ? SOURCE_TEMP : SINK_TEMP);
-    const before = ionEnergy(ion);
-    if (before < target * 0.02) {
-      thermaliseIon(ion, (isSource ? SOURCE_TEMP : SINK_TEMP) * 0.02);
-    }
-    const current = ionEnergy(ion);
-    const wanted = current + (target - current) * blend;
-    const scale = Math.sqrt(wanted / current);
-    ion.dx *= scale;
-    ion.dy *= scale;
-    ion.vx *= scale;
-    ion.vy *= scale;
-    const change = wanted - before;
-    if (isSource) state.sourceEnergy += change;
-    else state.sinkEnergy -= change;
-  }
-}
-
-function smoothingFactor(dt, tau) {
-  return 1 - Math.exp(-dt / tau);
 }
 
 function moveElectrons(state, dt) {
   const bounds = domainBounds(state);
   const ionGrid = state.ionGrid;
-  const massFactorElectron = (2 * ION_MASS) / (ELECTRON_MASS + ION_MASS);
-  const massFactorIon = (2 * ELECTRON_MASS) / (ELECTRON_MASS + ION_MASS);
   const left = bounds.left + ELECTRON_RADIUS;
   const right = bounds.right - ELECTRON_RADIUS;
   const top = bounds.top + ELECTRON_RADIUS;
@@ -411,20 +302,42 @@ function moveElectrons(state, dt) {
     const distance = Math.sqrt(distanceSq) || 0.0001;
     const nx = ox / distance;
     const ny = oy / distance;
-    const approach = (electron.vx - ion.vx) * nx + (electron.vy - ion.vy) * ny;
-    if (approach < 0) {
-      // Perfectly elastic collision between a light electron and a heavier,
-      // moving ion: momentum and kinetic energy are both conserved, so
-      // whichever particle was moving faster tends to hand energy over.
-      electron.vx -= massFactorElectron * approach * nx;
-      electron.vy -= massFactorElectron * approach * ny;
-      ion.vx += massFactorIon * approach * nx;
-      ion.vy += massFactorIon * approach * ny;
-      state.columnHits[column] += 1;
+    if (electron.vx * nx + electron.vy * ny < 0) {
+      // Share heat: both move towards their average temperature.
+      const difference = electron.temperature - ion.temperature;
+      ion.temperature += difference * HEAT_SHARE;
+      electron.temperature -= difference * HEAT_SHARE;
+
+      // Bounce off at the same speed, heading away from the ion in a
+      // somewhat random direction.
+      const speed = Math.hypot(electron.vx, electron.vy);
+      const angle = Math.atan2(ny, nx) + (Math.random() * 2 - 1) * SCATTER_HALF_ANGLE;
+      electron.vx = Math.cos(angle) * speed;
+      electron.vy = Math.sin(angle) * speed;
     }
     electron.x = ix + nx * CONTACT_DISTANCE;
     electron.y = iy + ny * CONTACT_DISTANCE;
   }
+}
+
+// The heater and cooler hold the source and sink ions at their temperatures.
+// Whatever heat that takes is the heat flowing in at the hot end and out at
+// the cold end.
+function holdReservoirs(state) {
+  if (!state.sourceOn && !state.sinkOn) return;
+  for (const ion of state.ions) {
+    if (ion.column === SOURCE_COLUMN) {
+      state.sourceEnergy += SOURCE_TEMP - ion.temperature;
+      ion.temperature = SOURCE_TEMP;
+    } else if (ion.column === SINK_COLUMN) {
+      state.sinkEnergy += ion.temperature - SINK_TEMP;
+      ion.temperature = SINK_TEMP;
+    }
+  }
+}
+
+function smoothingFactor(dt, tau) {
+  return 1 - Math.exp(-dt / tau);
 }
 
 const scratch = {
@@ -434,16 +347,9 @@ const scratch = {
   electronCounts: new Array(TOTAL_COLUMNS),
 };
 
-// Temperatures, heat flow and history are measured once per animation frame;
-// they are smoothed over seconds, so measuring every substep adds nothing.
+// Column temperatures are plain averages of the ions (and electrons) in each
+// column right now; nothing is smoothed, so nothing can drift on its own.
 function updateMeasurements(state, dt) {
-  // An ion's vibration energy only changes when an electron hits it (or, at
-  // the ends, when the heater or cooler adjusts it), so its temperature is
-  // read directly from that energy. A 2D oscillator holds on average 2kT.
-  for (const ion of state.ions) {
-    ion.temperature = ionEnergy(ion) / (2 * K_B);
-  }
-
   const ionSums = scratch.ionSums.fill(0);
   const ionCounts = scratch.ionCounts.fill(0);
   for (const ion of state.ions) {
@@ -454,44 +360,17 @@ function updateMeasurements(state, dt) {
   const electronCounts = scratch.electronCounts.fill(0);
   for (const electron of state.electrons) {
     const column = columnOfX(electron.x);
-    electronSums[column] += electronTemperature(electron);
+    electronSums[column] += electron.temperature;
     electronCounts[column] += 1;
   }
-  const electronBlend = smoothingFactor(dt, ELECTRON_SMOOTHING_S);
-
   for (let column = 0; column < TOTAL_COLUMNS; column += 1) {
-    const hits = state.columnHits[column];
-    state.columnHits[column] = 0;
-    const isReservoir = column === SOURCE_COLUMN || column === SINK_COLUMN;
-    const present =
-      (column !== SOURCE_COLUMN || state.sourceOn) && (column !== SINK_COLUMN || state.sinkOn);
-    if (!present) {
-      state.columnIonTemp[column] = NaN;
-      state.columnElectronTemp[column] = NaN;
-      continue;
-    }
-    if (ionCounts[column]) {
-      const mean = ionSums[column] / ionCounts[column];
-      const previous = state.columnIonTemp[column];
-      if (isReservoir || !Number.isFinite(previous)) {
-        // Source and sink ions are held at their temperature, so show it directly.
-        state.columnIonTemp[column] = mean;
-      } else {
-        const blend = 1 - Math.exp(-hits / COLUMN_SMOOTHING_COLLISIONS);
-        state.columnIonTemp[column] = previous + (mean - previous) * blend;
-      }
-    }
-    if (electronCounts[column]) {
-      const mean = electronSums[column] / electronCounts[column];
-      const previous = Number.isFinite(state.columnElectronTemp[column])
-        ? state.columnElectronTemp[column]
-        : mean;
-      // Fewer electrons in a column means a noisier average, so blend it in more gently.
-      const weight = Math.min(1, electronCounts[column] / 6);
-      state.columnElectronTemp[column] = previous + (mean - previous) * electronBlend * weight;
-    }
+    state.columnIonTemp[column] = ionCounts[column] ? ionSums[column] / ionCounts[column] : NaN;
+    state.columnElectronTemp[column] = electronCounts[column]
+      ? electronSums[column] / electronCounts[column]
+      : NaN;
   }
 
+  if (dt <= 0) return;
   state.powerSampleTime += dt;
   if (state.powerSampleTime >= POWER_SAMPLE_S) {
     const blend = smoothingFactor(state.powerSampleTime, POWER_SMOOTHING_S);
@@ -525,31 +404,30 @@ export function step(state, elapsed) {
 
   for (let i = 0; i < steps; i += 1) {
     state.time += dt;
-    moveIons(state, dt);
+    vibrateIons(state);
     moveElectrons(state, dt);
-    applyThermostats(state, dt);
+    holdReservoirs(state);
   }
   updateMeasurements(state, elapsed);
 }
 
-// Temperature of the metal itself (excluding the source and sink columns), in
-// kelvin, counting both its ions and the free electrons inside it, each
-// weighted by how much heat it holds (an ion 2k, an electron k). Energy only
-// moves between ions and electrons inside an insulated bar, so this stays
-// constant unless heat flows in or out through the ends.
+// Temperature of the metal itself (excluding the source and sink columns):
+// the average over its ions and the free electrons inside it. Ions and
+// electrons hold heat equally and collisions only share it, so in an
+// insulated bar this never changes.
 export function metalTemperature(state) {
-  let energy = 0;
-  let capacity = 0;
+  let sum = 0;
+  let count = 0;
   for (const ion of state.ions) {
     if (ion.column === SOURCE_COLUMN || ion.column === SINK_COLUMN) continue;
-    energy += ionEnergy(ion);
-    capacity += 2 * K_B;
+    sum += ion.temperature;
+    count += 1;
   }
   for (const electron of state.electrons) {
     const column = columnOfX(electron.x);
     if (column === SOURCE_COLUMN || column === SINK_COLUMN) continue;
-    energy += 0.5 * ELECTRON_MASS * (electron.vx * electron.vx + electron.vy * electron.vy);
-    capacity += K_B;
+    sum += electron.temperature;
+    count += 1;
   }
-  return capacity ? energy / capacity : ROOM_TEMP;
+  return count ? sum / count : ROOM_TEMP;
 }

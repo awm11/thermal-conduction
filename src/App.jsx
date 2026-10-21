@@ -354,40 +354,35 @@ function drawLatticeBackground(ctx, state) {
   ctx.fillText("METAL", LATTICE_X + LATTICE_WIDTH / 2, LATTICE_Y - 22);
 }
 
-// A single ion's energy swings a lot from one collision to the next, so on its
-// own its colour would flicker between hot and cold even in a uniform bar.
-// Colour each ion mostly by the smoothed temperature of its column, keeping a
-// little of its own energy so neighbouring ions still look individual.
-const OWN_ENERGY_SHARE = 0.3;
-
-function displayTemperature(ion, columnTemperature) {
-  if (!Number.isFinite(columnTemperature)) return ion.temperature;
-  return columnTemperature * (1 - OWN_ENERGY_SHARE) + ion.temperature * OWN_ENERGY_SHARE;
-}
-
-function drawIonShape(ctx, x, y, temperature) {
-  const { rgb, heat, cold } = temperatureColour(temperature);
+// The glow belongs to the lattice site: it is drawn at the ion's fixed
+// position and shows its temperature, while the ion itself vibrates inside it.
+function drawIonHalo(ctx, x, y, temperature) {
+  const { heat, cold } = temperatureColour(temperature);
   const r = ION_RADIUS;
-
-  // Warm halo grows with temperature (like the glow in a hot metal).
   if (heat > 0.02) {
-    const halo = ctx.createRadialGradient(x, y, r * 0.9, x, y, r * (1.3 + heat * 0.7));
-    halo.addColorStop(0, `rgba(255, 88, 40, ${0.15 + heat * 0.55})`);
+    const outer = r * (1.3 + heat * 0.7);
+    const halo = ctx.createRadialGradient(x, y, r * 0.5, x, y, outer);
+    halo.addColorStop(0, `rgba(255, 88, 40, ${0.2 + heat * 0.6})`);
     halo.addColorStop(1, "rgba(255, 88, 40, 0)");
     ctx.fillStyle = halo;
     ctx.beginPath();
-    ctx.arc(x, y, r * (1.3 + heat * 0.7), 0, Math.PI * 2);
+    ctx.arc(x, y, outer, 0, Math.PI * 2);
     ctx.fill();
   } else if (cold > 0.02) {
-    const halo = ctx.createRadialGradient(x, y, r * 0.9, x, y, r * (1.25 + cold * 0.45));
-    halo.addColorStop(0, `rgba(90, 160, 235, ${0.1 + cold * 0.35})`);
+    const outer = r * (1.25 + cold * 0.45);
+    const halo = ctx.createRadialGradient(x, y, r * 0.5, x, y, outer);
+    halo.addColorStop(0, `rgba(90, 160, 235, ${0.15 + cold * 0.4})`);
     halo.addColorStop(1, "rgba(90, 160, 235, 0)");
     ctx.fillStyle = halo;
     ctx.beginPath();
-    ctx.arc(x, y, r * (1.25 + cold * 0.45), 0, Math.PI * 2);
+    ctx.arc(x, y, outer, 0, Math.PI * 2);
     ctx.fill();
   }
+}
 
+function drawIonBody(ctx, x, y, temperature) {
+  const { rgb } = temperatureColour(temperature);
+  const r = ION_RADIUS;
   const centre = mix(rgb, [255, 255, 255], 0.42);
   const edge = rgb.map((value) => Math.round(value * 0.55));
   const g = ctx.createRadialGradient(x - r * 0.32, y - r * 0.32, r * 0.12, x, y, r);
@@ -412,11 +407,18 @@ function drawIonShape(ctx, x, y, temperature) {
   ctx.stroke();
 }
 
+function drawIonShape(ctx, x, y, temperature) {
+  drawIonHalo(ctx, x, y, temperature);
+  drawIonBody(ctx, x, y, temperature);
+}
+
 // Gradients are slow to build, so each look of ion and electron is drawn once
 // into a small offscreen canvas and then stamped with drawImage every frame.
-const ION_SPRITE_HALF = Math.ceil(ION_RADIUS * 2) + 2;
+const HALO_SPRITE_HALF = Math.ceil(ION_RADIUS * 2) + 2;
+const BODY_SPRITE_HALF = ION_RADIUS + 2;
 const ION_SPRITE_STEP_C = 4;
-const ionSprites = new Map();
+const haloSprites = new Map();
+const bodySprites = new Map();
 
 function makeSprite(half, draw) {
   const sprite = document.createElement("canvas");
@@ -427,16 +429,14 @@ function makeSprite(half, draw) {
   return sprite;
 }
 
-function ionSprite(temperature) {
+function cachedIonSprite(cache, half, drawShape, temperature) {
   const celsius = Math.max(-80, Math.min(340, toCelsius(temperature)));
   const key = Math.round(celsius / ION_SPRITE_STEP_C);
-  let sprite = ionSprites.get(key);
+  let sprite = cache.get(key);
   if (!sprite) {
     const kelvin = key * ION_SPRITE_STEP_C + 273;
-    sprite = makeSprite(ION_SPRITE_HALF, (spriteCtx) =>
-      drawIonShape(spriteCtx, ION_SPRITE_HALF, ION_SPRITE_HALF, kelvin),
-    );
-    ionSprites.set(key, sprite);
+    sprite = makeSprite(half, (spriteCtx) => drawShape(spriteCtx, half, half, kelvin));
+    cache.set(key, sprite);
   }
   return sprite;
 }
@@ -866,15 +866,25 @@ function drawParticleLayer(ctx, state) {
   roundedRect(ctx, LATTICE_X, LATTICE_Y, LATTICE_WIDTH, LATTICE_HEIGHT, 14);
   ctx.clip();
 
-  const ionSize = ION_SPRITE_HALF * 2;
+  // Glows first, fixed on the lattice sites, then the vibrating ions on top.
+  const haloSize = HALO_SPRITE_HALF * 2;
   for (const ion of state.ions) {
-    const sprite = ionSprite(displayTemperature(ion, state.columnIonTemp[ion.column]));
     ctx.drawImage(
-      sprite,
-      ion.restX + ion.dx - ION_SPRITE_HALF,
-      ion.restY + ion.dy - ION_SPRITE_HALF,
-      ionSize,
-      ionSize,
+      cachedIonSprite(haloSprites, HALO_SPRITE_HALF, drawIonHalo, ion.temperature),
+      ion.restX - HALO_SPRITE_HALF,
+      ion.restY - HALO_SPRITE_HALF,
+      haloSize,
+      haloSize,
+    );
+  }
+  const bodySize = BODY_SPRITE_HALF * 2;
+  for (const ion of state.ions) {
+    ctx.drawImage(
+      cachedIonSprite(bodySprites, BODY_SPRITE_HALF, drawIonBody, ion.temperature),
+      ion.restX + ion.dx - BODY_SPRITE_HALF,
+      ion.restY + ion.dy - BODY_SPRITE_HALF,
+      bodySize,
+      bodySize,
     );
   }
 
@@ -1249,18 +1259,18 @@ export default function App() {
                 <h3>Ions vibrate</h3>
                 <p>
                   The positive ions are held in a regular lattice, but each one vibrates about
-                  its fixed position. The hotter the metal, the more kinetic energy each ion has
-                  and the more it vibrates. Ion colour shows its temperature.
+                  its fixed position. The hotter an ion, the more energy it has and the more it
+                  vibrates. The glow around each lattice site shows the temperature there.
                 </p>
               </section>
               <section>
                 <h3>Free electrons carry the energy</h3>
                 <p>
-                  Free electrons move quickly between the ions. When an electron hits a
-                  fast-vibrating ion it usually bounces off with more energy; when it later hits
-                  a slower ion it usually hands some of that energy on. In this model the ions
-                  never touch each other, so electrons are the only way energy can travel along
-                  the bar.
+                  Free electrons move quickly between the ions, and each carries some energy,
+                  shown by its glow. When an electron hits an ion the two share their energy,
+                  so a hot ion warms the electron and the electron later warms a cooler ion
+                  somewhere else. In this model the ions never touch each other, so electrons
+                  are the only way energy can travel along the bar.
                 </p>
               </section>
               <section>
@@ -1279,6 +1289,15 @@ export default function App() {
                   rate of heat flow with very few electrons, with many, and with none at all.
                   Real metals also pass a little energy directly from ion to ion, but the free
                   electrons are why metals are such good thermal conductors.
+                </p>
+              </section>
+              <section>
+                <h3>About this model</h3>
+                <p>
+                  It follows the DoITPoMS thermal conduction simulation. Each particle&apos;s
+                  temperature is a single number that is shared in collisions, so electrons
+                  all travel at about the same speed; in a real metal, electrons and ions
+                  exchange energy far less in each collision but collide far more often.
                 </p>
               </section>
             </div>
