@@ -219,16 +219,45 @@ export function createState(electronCount = DEFAULT_ELECTRONS) {
   return state;
 }
 
+// Random speeds give a batch of electrons slightly too much or too little
+// energy overall. Scale the batch so its total kinetic energy is exactly what
+// its temperatures call for, so adding electrons never heats or cools the bar.
+function matchBatchEnergy(electrons, temperatureOf) {
+  let actual = 0;
+  let target = 0;
+  for (const electron of electrons) {
+    actual += 0.5 * ELECTRON_MASS * (electron.vx * electron.vx + electron.vy * electron.vy);
+    target += K_B * temperatureOf(electron);
+  }
+  if (actual <= 0) return;
+  const scale = Math.sqrt(target / actual);
+  for (const electron of electrons) {
+    electron.vx *= scale;
+    electron.vy *= scale;
+  }
+}
+
 export function setElectronCount(state, count) {
   const target = Math.max(0, Math.min(MAX_ELECTRONS, Math.round(count)));
   while (state.electrons.length > target) {
     state.electrons.splice(Math.floor(Math.random() * state.electrons.length), 1);
   }
+  // Electrons added inside the metal start at its current temperature (and
+  // any landing in the source or sink at that end's temperature), so adding
+  // electrons never changes how hot the bar is.
+  const metal = metalTemperature(state);
+  const added = [];
   while (state.electrons.length < target) {
     const electron = spawnElectron(state);
     if (!electron) break;
     state.electrons.push(electron);
+    added.push(electron);
   }
+  matchBatchEnergy(added, (electron) => {
+    const column = columnOfX(electron.x);
+    if (column === SOURCE_COLUMN || column === SINK_COLUMN) return localTemperature(state, electron.x);
+    return metal;
+  });
 }
 
 function keepElectronsInside(state) {
@@ -279,6 +308,7 @@ export function resetTemperatures(state) {
   for (const electron of state.electrons) {
     setElectronVelocity(electron, ROOM_TEMP);
   }
+  matchBatchEnergy(state.electrons, () => ROOM_TEMP);
   state.sourcePower = 0;
   state.sinkPower = 0;
   state.sourceEnergy = 0;
@@ -502,14 +532,24 @@ export function step(state, elapsed) {
   updateMeasurements(state, elapsed);
 }
 
-// Mean temperature of the metal itself (excluding source and sink columns), in kelvin.
+// Temperature of the metal itself (excluding the source and sink columns), in
+// kelvin, counting both its ions and the free electrons inside it, each
+// weighted by how much heat it holds (an ion 2k, an electron k). Energy only
+// moves between ions and electrons inside an insulated bar, so this stays
+// constant unless heat flows in or out through the ends.
 export function metalTemperature(state) {
-  let sum = 0;
-  let count = 0;
+  let energy = 0;
+  let capacity = 0;
   for (const ion of state.ions) {
     if (ion.column === SOURCE_COLUMN || ion.column === SINK_COLUMN) continue;
-    sum += ion.temperature;
-    count += 1;
+    energy += ionEnergy(ion);
+    capacity += 2 * K_B;
   }
-  return count ? sum / count : ROOM_TEMP;
+  for (const electron of state.electrons) {
+    const column = columnOfX(electron.x);
+    if (column === SOURCE_COLUMN || column === SINK_COLUMN) continue;
+    energy += 0.5 * ELECTRON_MASS * (electron.vx * electron.vx + electron.vy * electron.vy);
+    capacity += K_B;
+  }
+  return capacity ? energy / capacity : ROOM_TEMP;
 }
