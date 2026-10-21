@@ -59,8 +59,8 @@ const THERMOSTAT_TIME_S = 0.12; // how quickly source/sink ions are pulled back 
 // A column's displayed temperature is averaged over roughly this many recent
 // collisions in it. The average only moves when collisions actually happen,
 // so with no electrons nothing on screen can drift.
-const COLUMN_SMOOTHING_COLLISIONS = 250;
-const ELECTRON_SMOOTHING_S = 8;
+const COLUMN_SMOOTHING_COLLISIONS = 100;
+const ELECTRON_SMOOTHING_S = 4;
 const POWER_SMOOTHING_S = 30;
 const POWER_SAMPLE_S = 0.25;
 export const HISTORY_SECONDS = 120;
