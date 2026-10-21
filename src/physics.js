@@ -28,14 +28,14 @@ export const LATTICE_Y = 116;
 export const LATTICE_WIDTH = TOTAL_COLUMNS * SPACING;
 export const LATTICE_HEIGHT = (ROWS + 0.5) * SPACING;
 
-export const ION_RADIUS = 18; // drawn size
-export const ELECTRON_RADIUS = 4.6;
-// Electrons bounce off a slightly larger invisible radius than the drawn ion,
-// which shortens their mean free path to under one ion spacing. Without it
+// Ions are drawn at exactly the size electrons bounce off. This radius keeps
+// the electrons' mean free path under one ion spacing; with much smaller ions
 // the electrons mix the whole bar so thoroughly that almost all of the
 // temperature drop happens right at the ends.
-export const ION_COLLISION_RADIUS = 24;
-const contactDistance = () => ION_COLLISION_RADIUS + ELECTRON_RADIUS;
+export const ION_RADIUS = 24;
+export const ELECTRON_RADIUS = 4.6;
+const CONTACT_DISTANCE = ION_RADIUS + ELECTRON_RADIUS;
+const CONTACT_DISTANCE_SQ = CONTACT_DISTANCE * CONTACT_DISTANCE;
 
 // Temperatures in kelvin. Displayed in °C.
 export const KELVIN_OFFSET = 273;
@@ -52,8 +52,10 @@ const ION_MASS = 8;
 const ION_SPRING = 1250;
 const ION_OMEGA = Math.sqrt(ION_SPRING / ION_MASS);
 
-const MAX_SUBSTEP = 1 / 240;
-const THERMOSTAT_TIME_S = 0.35; // how quickly source/sink ions are pulled back to their held temperature
+// Electrons move at most a few pixels per substep, far less than the contact
+// distance, so collisions are never skipped.
+const MAX_SUBSTEP = 1 / 120;
+const THERMOSTAT_TIME_S = 0.12; // how quickly source/sink ions are pulled back to their held temperature
 const ION_TEMP_SMOOTHING_S = 1.2;
 const COLUMN_SMOOTHING_S = 12;
 const POWER_SMOOTHING_S = 30;
@@ -65,8 +67,8 @@ const HISTORY_SAMPLE_S = 0.5;
 export const POWER_UNIT = K_B * 100;
 export const POWER_AVERAGE_SECONDS = POWER_SMOOTHING_S;
 
-export const MAX_ELECTRONS = 200;
-export const DEFAULT_ELECTRONS = 80;
+export const MAX_ELECTRONS = 600;
+export const DEFAULT_ELECTRONS = 150;
 
 export const toCelsius = (kelvin) => kelvin - KELVIN_OFFSET;
 
@@ -126,6 +128,7 @@ function makeColumn(column, temperature) {
   for (let row = 0; row < ROWS; row += 1) {
     const ion = {
       column,
+      row,
       restX: columnX(column),
       restY: siteY(column, row),
       dx: 0,
@@ -166,7 +169,7 @@ function spawnElectron(state) {
     const x = bounds.left + ELECTRON_RADIUS + Math.random() * (bounds.right - bounds.left - 2 * ELECTRON_RADIUS);
     const y = bounds.top + ELECTRON_RADIUS + Math.random() * (bounds.bottom - bounds.top - 2 * ELECTRON_RADIUS);
     const clear = state.ions.every(
-      (ion) => Math.hypot(ion.restX - x, ion.restY - y) > contactDistance() + 6,
+      (ion) => Math.hypot(ion.restX - x, ion.restY - y) > CONTACT_DISTANCE + 6,
     );
     if (!clear) continue;
     const electron = { x, y, vx: 0, vy: 0, id: state.nextElectronId++ };
@@ -174,6 +177,15 @@ function spawnElectron(state) {
     return electron;
   }
   return null;
+}
+
+// ionGrid[column][row] gives the ion at that lattice site (or nothing for an
+// empty source/sink slot), so an electron can find its nearest ion directly.
+function rebuildIonGrid(state) {
+  state.ionGrid = Array.from({ length: TOTAL_COLUMNS }, () => null);
+  for (const ion of state.ions) {
+    (state.ionGrid[ion.column] ||= [])[ion.row] = ion;
+  }
 }
 
 export function createState(electronCount = DEFAULT_ELECTRONS) {
@@ -193,10 +205,12 @@ export function createState(electronCount = DEFAULT_ELECTRONS) {
     sinkPower: 0,
     history: [],
     historySampleTime: 0,
+    ionGrid: [],
   };
   for (let column = 1; column <= METAL_COLUMNS; column += 1) {
     state.ions.push(...makeColumn(column, ROOM_TEMP));
   }
+  rebuildIonGrid(state);
   setElectronCount(state, electronCount);
   return state;
 }
@@ -229,6 +243,7 @@ function keepElectronsInside(state) {
 function setReservoir(state, column, on, temperature) {
   state.ions = state.ions.filter((ion) => ion.column !== column);
   if (on) state.ions.push(...makeColumn(column, temperature));
+  rebuildIonGrid(state);
   state.columnIonTemp[column] = on ? temperature : NaN;
   state.columnElectronTemp[column] = on ? state.columnElectronTemp[column] || temperature : NaN;
 }
@@ -315,63 +330,77 @@ function smoothingFactor(dt, tau) {
 
 function moveElectrons(state, dt) {
   const bounds = domainBounds(state);
-  const ionsByColumn = state.ionsByColumn;
+  const ionGrid = state.ionGrid;
   const massFactorElectron = (2 * ION_MASS) / (ELECTRON_MASS + ION_MASS);
   const massFactorIon = (2 * ELECTRON_MASS) / (ELECTRON_MASS + ION_MASS);
+  const left = bounds.left + ELECTRON_RADIUS;
+  const right = bounds.right - ELECTRON_RADIUS;
+  const top = bounds.top + ELECTRON_RADIUS;
+  const bottom = bounds.bottom - ELECTRON_RADIUS;
 
   for (const electron of state.electrons) {
     electron.x += electron.vx * dt;
     electron.y += electron.vy * dt;
 
     // Walls are insulating: electrons bounce straight back off them.
-    if (electron.x < bounds.left + ELECTRON_RADIUS) {
-      electron.x = 2 * (bounds.left + ELECTRON_RADIUS) - electron.x;
+    if (electron.x < left) {
+      electron.x = 2 * left - electron.x;
       electron.vx = Math.abs(electron.vx);
-    } else if (electron.x > bounds.right - ELECTRON_RADIUS) {
-      electron.x = 2 * (bounds.right - ELECTRON_RADIUS) - electron.x;
+    } else if (electron.x > right) {
+      electron.x = 2 * right - electron.x;
       electron.vx = -Math.abs(electron.vx);
     }
-    if (electron.y < bounds.top + ELECTRON_RADIUS) {
-      electron.y = 2 * (bounds.top + ELECTRON_RADIUS) - electron.y;
+    if (electron.y < top) {
+      electron.y = 2 * top - electron.y;
       electron.vy = Math.abs(electron.vy);
-    } else if (electron.y > bounds.bottom - ELECTRON_RADIUS) {
-      electron.y = 2 * (bounds.bottom - ELECTRON_RADIUS) - electron.y;
+    } else if (electron.y > bottom) {
+      electron.y = 2 * bottom - electron.y;
       electron.vy = -Math.abs(electron.vy);
     }
 
-    const column = columnOfX(electron.x);
-    for (let c = column - 1; c <= column + 1; c += 1) {
-      const nearby = ionsByColumn[c];
-      if (!nearby) continue;
-      for (const ion of nearby) {
-        const ix = ion.restX + ion.dx;
-        const iy = ion.restY + ion.dy;
-        const ox = electron.x - ix;
-        const oy = electron.y - iy;
-        const distanceSq = ox * ox + oy * oy;
-        if (distanceSq >= contactDistance() ** 2) continue;
-        const distance = Math.sqrt(distanceSq) || 0.0001;
-        const nx = ox / distance;
-        const ny = oy / distance;
-        const approach = (electron.vx - ion.vx) * nx + (electron.vy - ion.vy) * ny;
-        if (approach < 0) {
-          // Perfectly elastic collision between a light electron and a heavier,
-          // moving ion: momentum and kinetic energy are both conserved, so
-          // whichever particle was moving faster tends to hand energy over.
-          electron.vx -= massFactorElectron * approach * nx;
-          electron.vy -= massFactorElectron * approach * ny;
-          ion.vx += massFactorIon * approach * nx;
-          ion.vy += massFactorIon * approach * ny;
-          ion.lastHit = state.time;
-          electron.lastHit = state.time;
-        }
-        electron.x = ix + nx * contactDistance();
-        electron.y = iy + ny * contactDistance();
-      }
+    // Ions are more than two contact distances apart, so the only ion an
+    // electron can be touching is the one at the nearest lattice site.
+    const column = Math.round((electron.x - LATTICE_X - SPACING / 2) / SPACING);
+    const columnIons = ionGrid[column];
+    if (!columnIons) continue;
+    const offset = column % 2 === 1 ? SPACING / 2 : 0;
+    const row = Math.round((electron.y - LATTICE_Y - SPACING / 2 - offset) / SPACING);
+    const ion = columnIons[row < 0 ? 0 : row >= ROWS ? ROWS - 1 : row];
+    if (!ion) continue;
+
+    const ix = ion.restX + ion.dx;
+    const iy = ion.restY + ion.dy;
+    const ox = electron.x - ix;
+    const oy = electron.y - iy;
+    const distanceSq = ox * ox + oy * oy;
+    if (distanceSq >= CONTACT_DISTANCE_SQ) continue;
+    const distance = Math.sqrt(distanceSq) || 0.0001;
+    const nx = ox / distance;
+    const ny = oy / distance;
+    const approach = (electron.vx - ion.vx) * nx + (electron.vy - ion.vy) * ny;
+    if (approach < 0) {
+      // Perfectly elastic collision between a light electron and a heavier,
+      // moving ion: momentum and kinetic energy are both conserved, so
+      // whichever particle was moving faster tends to hand energy over.
+      electron.vx -= massFactorElectron * approach * nx;
+      electron.vy -= massFactorElectron * approach * ny;
+      ion.vx += massFactorIon * approach * nx;
+      ion.vy += massFactorIon * approach * ny;
     }
+    electron.x = ix + nx * CONTACT_DISTANCE;
+    electron.y = iy + ny * CONTACT_DISTANCE;
   }
 }
 
+const scratch = {
+  ionSums: new Array(TOTAL_COLUMNS),
+  ionCounts: new Array(TOTAL_COLUMNS),
+  electronSums: new Array(TOTAL_COLUMNS),
+  electronCounts: new Array(TOTAL_COLUMNS),
+};
+
+// Temperatures, heat flow and history are measured once per animation frame;
+// they are smoothed over seconds, so measuring every substep adds nothing.
 function updateMeasurements(state, dt) {
   const ionBlend = smoothingFactor(dt, ION_TEMP_SMOOTHING_S);
   for (const ion of state.ions) {
@@ -381,14 +410,14 @@ function updateMeasurements(state, dt) {
   }
 
   const columnBlend = smoothingFactor(dt, COLUMN_SMOOTHING_S);
-  const ionSums = new Array(TOTAL_COLUMNS).fill(0);
-  const ionCounts = new Array(TOTAL_COLUMNS).fill(0);
+  const ionSums = scratch.ionSums.fill(0);
+  const ionCounts = scratch.ionCounts.fill(0);
   for (const ion of state.ions) {
     ionSums[ion.column] += ion.temperature;
     ionCounts[ion.column] += 1;
   }
-  const electronSums = new Array(TOTAL_COLUMNS).fill(0);
-  const electronCounts = new Array(TOTAL_COLUMNS).fill(0);
+  const electronSums = scratch.electronSums.fill(0);
+  const electronCounts = scratch.electronCounts.fill(0);
   for (const electron of state.electrons) {
     const column = columnOfX(electron.x);
     electronSums[column] += electronTemperature(electron);
@@ -445,21 +474,17 @@ function updateMeasurements(state, dt) {
 }
 
 export function step(state, elapsed) {
+  if (elapsed <= 0) return;
   const steps = Math.max(1, Math.ceil(elapsed / MAX_SUBSTEP));
   const dt = elapsed / steps;
-
-  state.ionsByColumn = [];
-  for (const ion of state.ions) {
-    (state.ionsByColumn[ion.column] ||= []).push(ion);
-  }
 
   for (let i = 0; i < steps; i += 1) {
     state.time += dt;
     moveIons(state, dt);
     moveElectrons(state, dt);
     applyThermostats(state, dt);
-    updateMeasurements(state, dt);
   }
+  updateMeasurements(state, elapsed);
 }
 
 // Mean temperature of the metal itself (excluding source and sink columns), in kelvin.

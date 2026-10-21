@@ -61,8 +61,9 @@ const PROFILE_MAX_C = 350;
 const SCALE_MIN_C = -50;
 const SCALE_MAX_C = 300;
 
-const ELECTRON_STEP = 10;
-const SPEEDS = [1, 2, 4];
+const ELECTRON_STEP = 50;
+const SPEEDS = [1, 4, 10];
+const GRAPH_REFRESH_MS = 100;
 const SLIDER_POINTER_GUTTER = 7;
 
 const HOT = "#d9480f";
@@ -201,7 +202,7 @@ function drawReservoirLabel(ctx, centreX, on, kind) {
 }
 
 // The heater / cooler block that sits behind each reservoir column.
-function drawReservoirDevice(ctx, kind, time) {
+function drawReservoirDevice(ctx, kind) {
   const isHot = kind === "hot";
   const x = isHot ? LATTICE_X - 30 : LATTICE_RIGHT + 6;
   const y = LATTICE_Y + 8;
@@ -228,9 +229,8 @@ function drawReservoirDevice(ctx, kind, time) {
   roundedRect(ctx, x, y, width, height, 8);
   ctx.clip();
   if (isHot) {
-    // Glowing heating coil, flickering gently.
-    const flicker = 0.75 + 0.25 * Math.sin(time * 7);
-    ctx.strokeStyle = `rgba(255, 214, 140, ${0.65 * flicker + 0.2})`;
+    // Glowing heating coil.
+    ctx.strokeStyle = "rgba(255, 214, 140, 0.8)";
     ctx.lineWidth = 2.5;
     ctx.beginPath();
     for (let yy = y + 10, i = 0; yy < y + height - 6; yy += 9, i += 1) {
@@ -287,7 +287,7 @@ function drawEmptySlot(ctx, slot, kind) {
   ctx.fillRect(wallX - 3, LATTICE_Y, 6, LATTICE_HEIGHT);
 }
 
-function drawLatticeBackground(ctx, state, time) {
+function drawLatticeBackground(ctx, state) {
   const metalLeft = LATTICE_X + SPACING;
   const metalRight = LATTICE_RIGHT - SPACING;
 
@@ -341,8 +341,8 @@ function drawLatticeBackground(ctx, state, time) {
   ctx.lineWidth = 2.5;
   ctx.stroke();
 
-  if (state.sourceOn) drawReservoirDevice(ctx, "hot", time);
-  if (state.sinkOn) drawReservoirDevice(ctx, "cold", time);
+  if (state.sourceOn) drawReservoirDevice(ctx, "hot");
+  if (state.sinkOn) drawReservoirDevice(ctx, "cold");
   drawReservoirLabel(ctx, SOURCE_SLOT.x + SOURCE_SLOT.width / 2, state.sourceOn, "hot");
   drawReservoirLabel(ctx, SINK_SLOT.x + SINK_SLOT.width / 2, state.sinkOn, "cold");
 
@@ -365,28 +365,26 @@ function displayTemperature(ion, columnTemperature) {
   return columnTemperature * (1 - OWN_ENERGY_SHARE) + ion.temperature * OWN_ENERGY_SHARE;
 }
 
-function drawIon(ctx, ion, time, temperature = ion.temperature) {
-  const x = ion.restX + ion.dx;
-  const y = ion.restY + ion.dy;
+function drawIonShape(ctx, x, y, temperature) {
   const { rgb, heat, cold } = temperatureColour(temperature);
   const r = ION_RADIUS;
 
   // Warm halo grows with temperature (like the glow in a hot metal).
   if (heat > 0.02) {
-    const halo = ctx.createRadialGradient(x, y, r * 0.8, x, y, r * (1.6 + heat * 1.3));
+    const halo = ctx.createRadialGradient(x, y, r * 0.9, x, y, r * (1.3 + heat * 0.7));
     halo.addColorStop(0, `rgba(255, 88, 40, ${0.15 + heat * 0.55})`);
     halo.addColorStop(1, "rgba(255, 88, 40, 0)");
     ctx.fillStyle = halo;
     ctx.beginPath();
-    ctx.arc(x, y, r * (1.6 + heat * 1.3), 0, Math.PI * 2);
+    ctx.arc(x, y, r * (1.3 + heat * 0.7), 0, Math.PI * 2);
     ctx.fill();
   } else if (cold > 0.02) {
-    const halo = ctx.createRadialGradient(x, y, r * 0.8, x, y, r * (1.5 + cold * 0.8));
+    const halo = ctx.createRadialGradient(x, y, r * 0.9, x, y, r * (1.25 + cold * 0.45));
     halo.addColorStop(0, `rgba(90, 160, 235, ${0.1 + cold * 0.35})`);
     halo.addColorStop(1, "rgba(90, 160, 235, 0)");
     ctx.fillStyle = halo;
     ctx.beginPath();
-    ctx.arc(x, y, r * (1.5 + cold * 0.8), 0, Math.PI * 2);
+    ctx.arc(x, y, r * (1.25 + cold * 0.45), 0, Math.PI * 2);
     ctx.fill();
   }
 
@@ -403,7 +401,7 @@ function drawIon(ctx, ion, time, temperature = ion.temperature) {
 
   // Positive ion marker.
   ctx.strokeStyle = "rgba(255, 255, 255, 0.82)";
-  ctx.lineWidth = 2.2;
+  ctx.lineWidth = 2.6;
   ctx.lineCap = "round";
   ctx.beginPath();
   const arm = r * 0.36;
@@ -412,36 +410,39 @@ function drawIon(ctx, ion, time, temperature = ion.temperature) {
   ctx.moveTo(x, y - arm);
   ctx.lineTo(x, y + arm);
   ctx.stroke();
-
-  // Brief ripple when an electron has just bounced off.
-  const sinceHit = time - (ion.lastHit ?? -10);
-  if (sinceHit < 0.3) {
-    const progress = sinceHit / 0.3;
-    ctx.beginPath();
-    ctx.arc(x, y, r + 2 + progress * 9, 0, Math.PI * 2);
-    ctx.strokeStyle = `rgba(255, 255, 255, ${0.75 * (1 - progress)})`;
-    ctx.lineWidth = 2;
-    ctx.stroke();
-  }
 }
 
-function drawElectron(ctx, electron) {
-  const { x, y, vx, vy } = electron;
-  const r = ELECTRON_RADIUS;
-  const { heat, cold } = temperatureColour(electronTemperature(electron));
+// Gradients are slow to build, so each look of ion and electron is drawn once
+// into a small offscreen canvas and then stamped with drawImage every frame.
+const ION_SPRITE_HALF = Math.ceil(ION_RADIUS * 2) + 2;
+const ION_SPRITE_STEP_C = 4;
+const ionSprites = new Map();
 
-  const speed = Math.hypot(vx, vy);
-  if (speed > 1) {
-    const trail = Math.min(0.09, 4.4 / speed);
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-    ctx.lineTo(x - vx * trail, y - vy * trail);
-    ctx.strokeStyle = "rgba(38, 175, 232, 0.3)";
-    ctx.lineWidth = 2.4;
-    ctx.lineCap = "round";
-    ctx.stroke();
+function makeSprite(half, draw) {
+  const sprite = document.createElement("canvas");
+  sprite.width = sprite.height = Math.ceil(half * 2 * CANVAS_RENDER_SCALE);
+  const spriteCtx = sprite.getContext("2d");
+  spriteCtx.scale(CANVAS_RENDER_SCALE, CANVAS_RENDER_SCALE);
+  draw(spriteCtx);
+  return sprite;
+}
+
+function ionSprite(temperature) {
+  const celsius = Math.max(-80, Math.min(340, toCelsius(temperature)));
+  const key = Math.round(celsius / ION_SPRITE_STEP_C);
+  let sprite = ionSprites.get(key);
+  if (!sprite) {
+    const kelvin = key * ION_SPRITE_STEP_C + 273;
+    sprite = makeSprite(ION_SPRITE_HALF, (spriteCtx) =>
+      drawIonShape(spriteCtx, ION_SPRITE_HALF, ION_SPRITE_HALF, kelvin),
+    );
+    ionSprites.set(key, sprite);
   }
+  return sprite;
+}
 
+function drawElectronShape(ctx, x, y, heat, cold) {
+  const r = ELECTRON_RADIUS;
   if (heat > 0.05) {
     ctx.beginPath();
     ctx.arc(x, y, r + 2 + heat * 4, 0, Math.PI * 2);
@@ -457,6 +458,29 @@ function drawElectron(ctx, electron) {
   ctx.arc(x, y, r, 0, Math.PI * 2);
   ctx.fillStyle = g;
   ctx.fill();
+}
+
+const ELECTRON_SPRITE_HALF = Math.ceil(ELECTRON_RADIUS + 7);
+const ELECTRON_HEAT_LEVELS = 10;
+const electronSprites = new Map();
+
+function electronSprite(electron) {
+  const { heat, cold } = temperatureColour(electronTemperature(electron));
+  const key = cold > 0.3 ? -1 : Math.round(heat * ELECTRON_HEAT_LEVELS);
+  let sprite = electronSprites.get(key);
+  if (!sprite) {
+    sprite = makeSprite(ELECTRON_SPRITE_HALF, (spriteCtx) =>
+      drawElectronShape(
+        spriteCtx,
+        ELECTRON_SPRITE_HALF,
+        ELECTRON_SPRITE_HALF,
+        key < 0 ? 0 : key / ELECTRON_HEAT_LEVELS,
+        key < 0 ? 1 : 0,
+      ),
+    );
+    electronSprites.set(key, sprite);
+  }
+  return sprite;
 }
 
 function drawTemperatureScale(ctx) {
@@ -498,18 +522,17 @@ function drawParticleKey(ctx) {
   ctx.textBaseline = "middle";
   ctx.font = "750 11px system-ui, sans-serif";
 
-  drawIon(ctx, { restX: x + 10, restY: y, dx: 0, dy: 0, temperature: ROOM_TEMP }, -10);
+  drawIonShape(ctx, x + 18, y, ROOM_TEMP);
   ctx.fillStyle = "#243d50";
-  ctx.fillText("positive ion", x + 32, y);
+  ctx.fillText("positive ion", x + 48, y);
 
-  drawElectron(ctx, { x: x + 128, y, vx: 0, vy: 0 });
+  drawElectronShape(ctx, x + 144, y, 0, 0);
   ctx.fillStyle = "#243d50";
-  ctx.fillText("free electron", x + 140, y);
+  ctx.fillText("free electron", x + 156, y);
 }
 
 function drawProfilePanel(ctx, state) {
   const panel = PROFILE_PANEL;
-  drawPanel(ctx, panel, "Temperature along the bar");
 
   const average = toCelsius(metalTemperature(state));
   ctx.textAlign = "right";
@@ -691,11 +714,6 @@ function drawProfilePanel(ctx, state) {
 
 function drawFlowPanel(ctx, state) {
   const panel = FLOW_PANEL;
-  drawPanel(ctx, panel, "Rate of heat flow");
-  ctx.textAlign = "right";
-  ctx.fillStyle = "#6b7b87";
-  ctx.font = "650 10.5px system-ui, sans-serif";
-  ctx.fillText(`averaged over ${POWER_AVERAGE_SECONDS} s of simulation`, panel.x + panel.width - 18, panel.y + 26);
 
   const plot = {
     x: panel.x + 58,
@@ -800,8 +818,15 @@ function drawFlowPanel(ctx, state) {
   }
 }
 
-function drawScene(ctx, state, time) {
+// The stage is three stacked canvases so each part is only redrawn when it
+// changes: the static layer when the source or sink is switched, the graphs a
+// few times a second, and only the lattice region every frame.
+function prepareLayer(ctx) {
   ctx.setTransform(CANVAS_RENDER_SCALE, 0, 0, CANVAS_RENDER_SCALE, 0, 0);
+}
+
+function drawStaticLayer(ctx, state) {
+  prepareLayer(ctx);
   const background = ctx.createLinearGradient(0, 0, 0, HEIGHT);
   background.addColorStop(0, "#f7fafc");
   background.addColorStop(1, "#e8edf2");
@@ -809,19 +834,73 @@ function drawScene(ctx, state, time) {
   ctx.fillRect(0, 0, WIDTH, HEIGHT);
 
   drawFrame(ctx);
-  drawLatticeBackground(ctx, state, time);
+  drawLatticeBackground(ctx, state);
+  drawParticleKey(ctx);
+  drawTemperatureScale(ctx);
 
+  drawPanel(ctx, PROFILE_PANEL, "Temperature along the bar");
+  drawPanel(ctx, FLOW_PANEL, "Rate of heat flow");
+  ctx.textAlign = "right";
+  ctx.fillStyle = "#6b7b87";
+  ctx.font = "650 10.5px system-ui, sans-serif";
+  ctx.fillText(
+    `averaged over ${POWER_AVERAGE_SECONDS} s of simulation`,
+    FLOW_PANEL.x + FLOW_PANEL.width - 18,
+    FLOW_PANEL.y + 26,
+  );
+}
+
+function drawParticleLayer(ctx, state) {
+  prepareLayer(ctx);
+  ctx.clearRect(LATTICE_X - 2, LATTICE_Y - 2, LATTICE_WIDTH + 4, LATTICE_HEIGHT + 4);
   ctx.save();
   roundedRect(ctx, LATTICE_X, LATTICE_Y, LATTICE_WIDTH, LATTICE_HEIGHT, 14);
   ctx.clip();
-  for (const ion of state.ions) {
-    drawIon(ctx, ion, state.time, displayTemperature(ion, state.columnIonTemp[ion.column]));
-  }
-  for (const electron of state.electrons) drawElectron(ctx, electron);
-  ctx.restore();
 
-  drawParticleKey(ctx);
-  drawTemperatureScale(ctx);
+  const ionSize = ION_SPRITE_HALF * 2;
+  for (const ion of state.ions) {
+    const sprite = ionSprite(displayTemperature(ion, state.columnIonTemp[ion.column]));
+    ctx.drawImage(
+      sprite,
+      ion.restX + ion.dx - ION_SPRITE_HALF,
+      ion.restY + ion.dy - ION_SPRITE_HALF,
+      ionSize,
+      ionSize,
+    );
+  }
+
+  // All electron motion streaks in a single path.
+  ctx.beginPath();
+  for (const electron of state.electrons) {
+    const speed = Math.hypot(electron.vx, electron.vy);
+    if (speed < 1) continue;
+    const trail = Math.min(0.09, 4.4 / speed);
+    ctx.moveTo(electron.x, electron.y);
+    ctx.lineTo(electron.x - electron.vx * trail, electron.y - electron.vy * trail);
+  }
+  ctx.strokeStyle = "rgba(38, 175, 232, 0.3)";
+  ctx.lineWidth = 2.4;
+  ctx.lineCap = "round";
+  ctx.stroke();
+
+  const electronSize = ELECTRON_SPRITE_HALF * 2;
+  for (const electron of state.electrons) {
+    ctx.drawImage(
+      electronSprite(electron),
+      electron.x - ELECTRON_SPRITE_HALF,
+      electron.y - ELECTRON_SPRITE_HALF,
+      electronSize,
+      electronSize,
+    );
+  }
+  ctx.restore();
+}
+
+function drawGraphLayer(ctx, state) {
+  prepareLayer(ctx);
+  for (const panel of [PROFILE_PANEL, FLOW_PANEL]) {
+    ctx.clearRect(panel.x, panel.y, panel.width, panel.height);
+  }
   drawProfilePanel(ctx, state);
   drawFlowPanel(ctx, state);
 }
@@ -834,6 +913,8 @@ export default function App() {
   useFitToScreen();
 
   const canvasRef = useRef(null);
+  const particleCanvasRef = useRef(null);
+  const graphCanvasRef = useRef(null);
   const simRef = useRef(null);
   const sliderRef = useRef(null);
   const draggingRef = useRef(false);
@@ -856,17 +937,28 @@ export default function App() {
     simRef.current = createState(DEFAULT_ELECTRONS);
   }
 
+  // Static layer: redrawn only when the ends are switched on or off.
   useEffect(() => {
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext("2d");
+    drawStaticLayer(canvasRef.current.getContext("2d"), simRef.current);
+    drawGraphLayer(graphCanvasRef.current.getContext("2d"), simRef.current);
+  }, [sourceOn, sinkOn]);
+
+  useEffect(() => {
+    const particleCtx = particleCanvasRef.current.getContext("2d");
+    const graphCtx = graphCanvasRef.current.getContext("2d");
     let frame = 0;
     let last = performance.now();
+    let lastGraph = 0;
 
     const tick = (now) => {
       const elapsed = Math.min(0.05, (now - last) / 1000);
       last = now;
       if (!pausedRef.current) step(simRef.current, elapsed * speedRef.current);
-      drawScene(ctx, simRef.current, now / 1000);
+      drawParticleLayer(particleCtx, simRef.current);
+      if (now - lastGraph >= GRAPH_REFRESH_MS) {
+        lastGraph = now;
+        drawGraphLayer(graphCtx, simRef.current);
+      }
       frame = requestAnimationFrame(tick);
     };
     frame = requestAnimationFrame(tick);
@@ -899,7 +991,7 @@ export default function App() {
     const rect = sliderRef.current.getBoundingClientRect();
     const inner = rect.width - SLIDER_POINTER_GUTTER * 2;
     const fraction = clamp01((event.clientX - rect.left - SLIDER_POINTER_GUTTER) / inner);
-    return Math.round((fraction * MAX_ELECTRONS) / 5) * 5;
+    return Math.round((fraction * MAX_ELECTRONS) / 10) * 10;
   };
 
   const handlePointerDown = (event) => {
@@ -918,12 +1010,12 @@ export default function App() {
   };
   const handleSliderKeyDown = (event) => {
     const keys = {
-      ArrowLeft: -5,
-      ArrowDown: -5,
-      ArrowRight: 5,
-      ArrowUp: 5,
-      PageDown: -20,
-      PageUp: 20,
+      ArrowLeft: -10,
+      ArrowDown: -10,
+      ArrowRight: 10,
+      ArrowUp: 10,
+      PageDown: -50,
+      PageUp: 50,
     };
     if (event.key in keys) {
       event.preventDefault();
@@ -1100,6 +1192,20 @@ export default function App() {
               className="fs-stage"
               role="img"
               aria-label="Ions vibrating on a lattice with free electrons moving between them. A hot source can be added at the left end and a cold sink at the right end."
+            />
+            <canvas
+              ref={particleCanvasRef}
+              width={WIDTH * CANVAS_RENDER_SCALE}
+              height={HEIGHT * CANVAS_RENDER_SCALE}
+              className="fs-stage-layer"
+              aria-hidden="true"
+            />
+            <canvas
+              ref={graphCanvasRef}
+              width={WIDTH * CANVAS_RENDER_SCALE}
+              height={HEIGHT * CANVAS_RENDER_SCALE}
+              className="fs-stage-layer"
+              aria-hidden="true"
             />
           </div>
         </section>
@@ -1296,6 +1402,15 @@ const layoutCss = `
     width: 100%;
     height: auto;
     aspect-ratio: ${WIDTH} / ${HEIGHT};
+  }
+
+  .fs-stage-layer {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
   }
 
   /* Control panel floats over the top of the right-hand column */
