@@ -56,8 +56,11 @@ const ION_OMEGA = Math.sqrt(ION_SPRING / ION_MASS);
 // distance, so collisions are never skipped.
 const MAX_SUBSTEP = 1 / 120;
 const THERMOSTAT_TIME_S = 0.12; // how quickly source/sink ions are pulled back to their held temperature
-const ION_TEMP_SMOOTHING_S = 1.2;
-const COLUMN_SMOOTHING_S = 12;
+// A column's displayed temperature is averaged over roughly this many recent
+// collisions in it. The average only moves when collisions actually happen,
+// so with no electrons nothing on screen can drift.
+const COLUMN_SMOOTHING_COLLISIONS = 250;
+const ELECTRON_SMOOTHING_S = 8;
 const POWER_SMOOTHING_S = 30;
 const POWER_SAMPLE_S = 0.25;
 export const HISTORY_SECONDS = 120;
@@ -206,6 +209,7 @@ export function createState(electronCount = DEFAULT_ELECTRONS) {
     history: [],
     historySampleTime: 0,
     ionGrid: [],
+    columnHits: new Array(TOTAL_COLUMNS).fill(0),
   };
   for (let column = 1; column <= METAL_COLUMNS; column += 1) {
     state.ions.push(...makeColumn(column, ROOM_TEMP));
@@ -386,6 +390,7 @@ function moveElectrons(state, dt) {
       electron.vy -= massFactorElectron * approach * ny;
       ion.vx += massFactorIon * approach * nx;
       ion.vy += massFactorIon * approach * ny;
+      state.columnHits[column] += 1;
     }
     electron.x = ix + nx * CONTACT_DISTANCE;
     electron.y = iy + ny * CONTACT_DISTANCE;
@@ -402,14 +407,13 @@ const scratch = {
 // Temperatures, heat flow and history are measured once per animation frame;
 // they are smoothed over seconds, so measuring every substep adds nothing.
 function updateMeasurements(state, dt) {
-  const ionBlend = smoothingFactor(dt, ION_TEMP_SMOOTHING_S);
+  // An ion's vibration energy only changes when an electron hits it (or, at
+  // the ends, when the heater or cooler adjusts it), so its temperature is
+  // read directly from that energy. A 2D oscillator holds on average 2kT.
   for (const ion of state.ions) {
-    // A 2D oscillator holds on average 2kT (kinetic + potential).
-    const instantaneous = ionEnergy(ion) / (2 * K_B);
-    ion.temperature += (instantaneous - ion.temperature) * ionBlend;
+    ion.temperature = ionEnergy(ion) / (2 * K_B);
   }
 
-  const columnBlend = smoothingFactor(dt, COLUMN_SMOOTHING_S);
   const ionSums = scratch.ionSums.fill(0);
   const ionCounts = scratch.ionCounts.fill(0);
   for (const ion of state.ions) {
@@ -423,7 +427,12 @@ function updateMeasurements(state, dt) {
     electronSums[column] += electronTemperature(electron);
     electronCounts[column] += 1;
   }
+  const electronBlend = smoothingFactor(dt, ELECTRON_SMOOTHING_S);
+
   for (let column = 0; column < TOTAL_COLUMNS; column += 1) {
+    const hits = state.columnHits[column];
+    state.columnHits[column] = 0;
+    const isReservoir = column === SOURCE_COLUMN || column === SINK_COLUMN;
     const present =
       (column !== SOURCE_COLUMN || state.sourceOn) && (column !== SINK_COLUMN || state.sinkOn);
     if (!present) {
@@ -433,8 +442,14 @@ function updateMeasurements(state, dt) {
     }
     if (ionCounts[column]) {
       const mean = ionSums[column] / ionCounts[column];
-      const previous = Number.isFinite(state.columnIonTemp[column]) ? state.columnIonTemp[column] : mean;
-      state.columnIonTemp[column] = previous + (mean - previous) * columnBlend;
+      const previous = state.columnIonTemp[column];
+      if (isReservoir || !Number.isFinite(previous)) {
+        // Source and sink ions are held at their temperature, so show it directly.
+        state.columnIonTemp[column] = mean;
+      } else {
+        const blend = 1 - Math.exp(-hits / COLUMN_SMOOTHING_COLLISIONS);
+        state.columnIonTemp[column] = previous + (mean - previous) * blend;
+      }
     }
     if (electronCounts[column]) {
       const mean = electronSums[column] / electronCounts[column];
@@ -443,7 +458,7 @@ function updateMeasurements(state, dt) {
         : mean;
       // Fewer electrons in a column means a noisier average, so blend it in more gently.
       const weight = Math.min(1, electronCounts[column] / 6);
-      state.columnElectronTemp[column] = previous + (mean - previous) * columnBlend * weight;
+      state.columnElectronTemp[column] = previous + (mean - previous) * electronBlend * weight;
     }
   }
 
