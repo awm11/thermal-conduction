@@ -1,0 +1,31 @@
+/* Matches the header's other buttons (see .fs-header-button) */
+.fs-fullscreen-button {
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  width: 27px;
+  height: 27px;
+  padding: 0;
+  border: 1px solid #9aa9b5;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #19324a;
+  cursor: pointer;
+}
+.fs-fullscreen-button:hover { background: #f3f6f8; }
+.fs-fullscreen-button:focus-visible {
+  outline: 3px solid rgba(25, 50, 74, 0.28);
+  outline-offset: 2px;
+}
+.fs-fullscreen-button svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+@media (max-width: 820px) {
+  .fs-fullscreen-button { width: 34px; height: 34px; }
+}
