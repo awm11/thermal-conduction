@@ -41,8 +41,38 @@ const FRAME = { x: 28, y: 20, width: 1020, height: 884 };
 const PANEL_X = 1072;
 const PANEL_WIDTH = WIDTH - PANEL_X - 26;
 const CONTROLS = { y: 20, height: 214 };
-const PROFILE_PANEL = { x: PANEL_X, y: 248, width: PANEL_WIDTH, height: 340 };
-const FLOW_PANEL = { x: PANEL_X, y: 602, width: PANEL_WIDTH, height: 302 };
+
+// The two graph panes stack below the controls. A minimised pane shrinks to
+// its header strip, and an open pane grows to use the space that frees up.
+// Default top of the graph panes, used until the controls panel has been
+// measured. The panes then start just below wherever the controls end.
+const PANES_TOP = CONTROLS.y + CONTROLS.height + 14;
+const PANES_BOTTOM = 904;
+const PANE_GAP = 14;
+const PANE_COLLAPSED_HEIGHT = 52;
+const PROFILE_DEFAULT_HEIGHT = 340;
+// Room kept at the right of each pane header for its minimise button.
+const PANE_BUTTON_ROOM = 36;
+
+function paneLayout(profileMinimised, flowMinimised, top = PANES_TOP) {
+  const available = PANES_BOTTOM - top - PANE_GAP;
+  let profileHeight;
+  if (profileMinimised) profileHeight = PANE_COLLAPSED_HEIGHT;
+  else if (flowMinimised) profileHeight = available - PANE_COLLAPSED_HEIGHT;
+  else profileHeight = Math.min(PROFILE_DEFAULT_HEIGHT, Math.round(available * 0.53));
+  const flowHeight = flowMinimised ? PANE_COLLAPSED_HEIGHT : available - profileHeight;
+  const profile = { x: PANEL_X, y: top, width: PANEL_WIDTH, height: profileHeight };
+  const flow = {
+    x: PANEL_X,
+    y: top + profileHeight + PANE_GAP,
+    width: PANEL_WIDTH,
+    height: flowHeight,
+  };
+  return {
+    profile: { ...profile, minimised: profileMinimised },
+    flow: { ...flow, minimised: flowMinimised },
+  };
+}
 
 const LATTICE_RIGHT = LATTICE_X + LATTICE_WIDTH;
 const LATTICE_BOTTOM = LATTICE_Y + LATTICE_HEIGHT;
@@ -531,15 +561,15 @@ function drawParticleKey(ctx) {
   ctx.fillText("free electron", x + 156, y);
 }
 
-function drawProfilePanel(ctx, state) {
-  const panel = PROFILE_PANEL;
-
+function drawProfilePanel(ctx, state, panel) {
   const average = toCelsius(metalTemperature(state));
+  const right = panel.x + panel.width - PANE_BUTTON_ROOM;
   ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
   ctx.fillStyle = "#5c6d7a";
   ctx.font = "650 11px system-ui, sans-serif";
-  ctx.fillText("metal average", panel.x + panel.width - 72, panel.y + 26);
-  roundedRect(ctx, panel.x + panel.width - 66, panel.y + 15, 50, 22, 5);
+  ctx.fillText("metal average", right - 72, panel.y + 26);
+  roundedRect(ctx, right - 66, panel.y + 15, 50, 22, 5);
   ctx.fillStyle = "#f4f7f9";
   ctx.fill();
   ctx.strokeStyle = "#c9d4dc";
@@ -548,7 +578,8 @@ function drawProfilePanel(ctx, state) {
   ctx.fillStyle = "#19324a";
   ctx.font = "800 12px ui-monospace, SFMono-Regular, Menlo, monospace";
   ctx.textAlign = "center";
-  ctx.fillText(`${formatC(Math.round(average))}°C`, panel.x + panel.width - 41, panel.y + 26.5);
+  ctx.fillText(`${formatC(Math.round(average))}°C`, right - 41, panel.y + 26.5);
+  if (panel.minimised) return;
 
   const plot = {
     x: panel.x + 58,
@@ -712,8 +743,28 @@ function drawProfilePanel(ctx, state) {
   ctx.fillText(`room temperature`, rx + 24, legendY);
 }
 
-function drawFlowPanel(ctx, state) {
-  const panel = FLOW_PANEL;
+function drawFlowPanel(ctx, state, panel) {
+  if (panel.minimised) {
+    // Header strip only: the two current rates side by side.
+    let x = panel.x + panel.width - PANE_BUTTON_ROOM - 16;
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "right";
+    for (const item of [
+      { label: "out", value: state.sinkOn ? state.sinkPower : null, colour: COLD },
+      { label: "in", value: state.sourceOn ? state.sourcePower : null, colour: HOT },
+    ]) {
+      const text = item.value === null ? "off" : Math.max(0, item.value).toFixed(1);
+      ctx.font = "800 13px ui-monospace, SFMono-Regular, Menlo, monospace";
+      ctx.fillStyle = item.value === null ? "#9aa8b2" : item.colour;
+      ctx.fillText(text, x, panel.y + 26.5);
+      x -= ctx.measureText(text).width + 6;
+      ctx.font = "650 11px system-ui, sans-serif";
+      ctx.fillStyle = "#5c6d7a";
+      ctx.fillText(item.label, x, panel.y + 26);
+      x -= ctx.measureText(item.label).width + 16;
+    }
+    return;
+  }
 
   const plot = {
     x: panel.x + 58,
@@ -825,7 +876,7 @@ function prepareLayer(ctx) {
   ctx.setTransform(CANVAS_RENDER_SCALE, 0, 0, CANVAS_RENDER_SCALE, 0, 0);
 }
 
-function drawStaticLayer(ctx, state) {
+function drawStaticLayer(ctx, state, panes) {
   prepareLayer(ctx);
   const background = ctx.createLinearGradient(0, 0, 0, HEIGHT);
   background.addColorStop(0, "#f7fafc");
@@ -838,16 +889,18 @@ function drawStaticLayer(ctx, state) {
   drawParticleKey(ctx);
   drawTemperatureScale(ctx);
 
-  drawPanel(ctx, PROFILE_PANEL, "Temperature along the bar");
-  drawPanel(ctx, FLOW_PANEL, "Rate of heat flow");
-  ctx.textAlign = "right";
-  ctx.fillStyle = "#6b7b87";
-  ctx.font = "650 10.5px system-ui, sans-serif";
-  ctx.fillText(
-    `averaged over ${POWER_AVERAGE_SECONDS} s of simulation`,
-    FLOW_PANEL.x + FLOW_PANEL.width - 18,
-    FLOW_PANEL.y + 26,
-  );
+  drawPanel(ctx, panes.profile, "Temperature along the bar");
+  drawPanel(ctx, panes.flow, "Rate of heat flow");
+  if (!panes.flow.minimised) {
+    ctx.textAlign = "right";
+    ctx.fillStyle = "#6b7b87";
+    ctx.font = "650 10.5px system-ui, sans-serif";
+    ctx.fillText(
+      `averaged over ${POWER_AVERAGE_SECONDS} s`,
+      panes.flow.x + panes.flow.width - PANE_BUTTON_ROOM - 6,
+      panes.flow.y + 26,
+    );
+  }
 }
 
 // The particle canvas covers only the lattice, so the whole of it is cleared
@@ -915,11 +968,26 @@ function drawParticleLayer(ctx, state) {
   ctx.restore();
 }
 
-function drawGraphLayer(ctx, state) {
+function drawGraphLayer(ctx, state, panes) {
   prepareLayer(ctx);
   ctx.clearRect(0, 0, WIDTH, HEIGHT);
-  drawProfilePanel(ctx, state);
-  drawFlowPanel(ctx, state);
+  drawProfilePanel(ctx, state, panes.profile);
+  drawFlowPanel(ctx, state, panes.flow);
+}
+
+function MinimiseButton({ minimised, onClick, label }) {
+  return (
+    <button
+      type="button"
+      className="fs-minimise-button"
+      onClick={onClick}
+      aria-label={`${minimised ? "Expand" : "Minimise"} ${label}`}
+      aria-expanded={!minimised}
+      title={`${minimised ? "Expand" : "Minimise"} ${label}`}
+    >
+      {minimised ? "+" : "−"}
+    </button>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -942,6 +1010,37 @@ export default function App() {
   const [paused, setPaused] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [showExplanation, setShowExplanation] = useState(false);
+  const [profileMinimised, setProfileMinimised] = useState(false);
+  const [flowMinimised, setFlowMinimised] = useState(true);
+  // Bottom edge of the controls panel in stage units. Its text and buttons
+  // have fixed sizes, so in a small window it is taller relative to the stage;
+  // the graph panes always start below it so nothing overlaps or is cut off.
+  const [panesTop, setPanesTop] = useState(PANES_TOP);
+  const controlsRef = useRef(null);
+  const panes = paneLayout(profileMinimised, flowMinimised, panesTop);
+  const panesRef = useRef(panes);
+
+  useEffect(() => {
+    const controls = controlsRef.current;
+    const stage = canvasRef.current;
+    const measure = () => {
+      let top = CONTROLS.y;
+      if (getComputedStyle(controls).position === "absolute") {
+        const stageRect = stage.getBoundingClientRect();
+        const controlsRect = controls.getBoundingClientRect();
+        if (stageRect.height > 0) {
+          const bottom = ((controlsRect.bottom - stageRect.top) / stageRect.height) * HEIGHT;
+          top = Math.ceil(bottom) + 14;
+        }
+      }
+      setPanesTop((previous) => (Math.abs(previous - top) > 1 ? top : previous));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(controls);
+    observer.observe(stage);
+    return () => observer.disconnect();
+  }, []);
 
   const pausedRef = useRef(paused);
   const speedRef = useRef(speed);
@@ -954,11 +1053,14 @@ export default function App() {
     simRef.current = createState(DEFAULT_ELECTRONS);
   }
 
-  // Static layer: redrawn only when the ends are switched on or off.
+  // Static layer: redrawn only when the ends are switched on or off, or a
+  // graph pane is minimised or expanded.
   useEffect(() => {
-    drawStaticLayer(canvasRef.current.getContext("2d"), simRef.current);
-    drawGraphLayer(graphCanvasRef.current.getContext("2d"), simRef.current);
-  }, [sourceOn, sinkOn]);
+    const layout = paneLayout(profileMinimised, flowMinimised, panesTop);
+    panesRef.current = layout;
+    drawStaticLayer(canvasRef.current.getContext("2d"), simRef.current, layout);
+    drawGraphLayer(graphCanvasRef.current.getContext("2d"), simRef.current, layout);
+  }, [sourceOn, sinkOn, profileMinimised, flowMinimised, panesTop]);
 
   useEffect(() => {
     const particleCtx = particleCanvasRef.current.getContext("2d");
@@ -974,7 +1076,7 @@ export default function App() {
       drawParticleLayer(particleCtx, simRef.current);
       if (now - lastGraph >= GRAPH_REFRESH_MS) {
         lastGraph = now;
-        drawGraphLayer(graphCtx, simRef.current);
+        drawGraphLayer(graphCtx, simRef.current, panesRef.current);
       }
       frame = requestAnimationFrame(tick);
     };
@@ -1086,7 +1188,7 @@ export default function App() {
         </header>
 
         <section className="fs-stage-card" aria-label="Particle simulation and graphs">
-          <div className="fs-stage-controls" aria-label="Simulation controls">
+          <div className="fs-stage-controls" ref={controlsRef} aria-label="Simulation controls">
             <div className="fs-electron-control">
               <div className="fs-control-heading">
                 <span>Number of free electrons</span>
@@ -1155,7 +1257,7 @@ export default function App() {
                 </span>
                 <span className="fs-toggle-text">
                   <strong>Hot source</strong>
-                  <span>left end · {SOURCE_C} °C</span>
+                  <span>left end · {SOURCE_C}{"\u00a0"}°C</span>
                 </span>
               </label>
 
@@ -1173,7 +1275,7 @@ export default function App() {
                 </span>
                 <span className="fs-toggle-text">
                   <strong>Cold sink</strong>
-                  <span>right end · {formatC(SINK_C)} °C</span>
+                  <span>right end · {formatC(SINK_C)}{"\u00a0"}°C</span>
                 </span>
               </label>
             </div>
@@ -1224,6 +1326,29 @@ export default function App() {
               className="fs-stage-layer"
               aria-hidden="true"
             />
+            {[
+              {
+                pane: panes.profile,
+                label: "temperature graph",
+                toggle: () => setProfileMinimised((value) => !value),
+              },
+              {
+                pane: panes.flow,
+                label: "heat flow graph",
+                toggle: () => setFlowMinimised((value) => !value),
+              },
+            ].map(({ pane, label, toggle }) => (
+              <div
+                key={label}
+                className="fs-pane-toggle"
+                style={{
+                  left: `${((pane.x + pane.width - PANE_BUTTON_ROOM + 6) / WIDTH) * 100}%`,
+                  top: `${((pane.y + 26) / HEIGHT) * 100}%`,
+                }}
+              >
+                <MinimiseButton minimised={pane.minimised} onClick={toggle} label={label} />
+              </div>
+            ))}
           </div>
         </section>
 
@@ -1449,6 +1574,38 @@ const layoutCss = `
     pointer-events: none;
   }
 
+  /* Minimise buttons sit in the top-right corner of each graph pane */
+  .fs-pane-toggle {
+    position: absolute;
+    z-index: 3;
+    transform: translateY(-50%);
+  }
+
+  .fs-minimise-button {
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: 1px solid #c4ced6;
+    border-radius: 5px;
+    background: #ffffff;
+    color: #4d5b66;
+    font-size: 13px;
+    font-weight: 800;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .fs-minimise-button:hover {
+    background: #eef3f6;
+  }
+
+  .fs-minimise-button:focus-visible {
+    outline: 3px solid rgba(25, 50, 74, 0.24);
+    outline-offset: 2px;
+  }
+
   /* Control panel floats over the top of the right-hand column */
   .fs-stage-controls {
     position: absolute;
@@ -1456,7 +1613,7 @@ const layoutCss = `
     left: ${pct(PANEL_X, WIDTH)};
     top: ${pct(CONTROLS.y, HEIGHT)};
     width: ${pct(PANEL_WIDTH, WIDTH)};
-    height: ${pct(CONTROLS.height, HEIGHT)};
+    min-height: ${pct(CONTROLS.height, HEIGHT)};
     padding: 8px 10px;
     display: grid;
     grid-template-rows: auto auto auto;
@@ -1699,7 +1856,7 @@ const layoutCss = `
     color: #667581;
     font-size: 9.5px;
     font-weight: 650;
-    white-space: nowrap;
+    line-height: 1.15;
   }
 
   .fs-actions {
