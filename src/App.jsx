@@ -850,9 +850,18 @@ function drawStaticLayer(ctx, state) {
   );
 }
 
+// The particle canvas covers only the lattice, so the whole of it is cleared
+// and redrawn each frame and nothing outside the lattice is ever composited.
 function drawParticleLayer(ctx, state) {
-  prepareLayer(ctx);
-  ctx.clearRect(LATTICE_X - 2, LATTICE_Y - 2, LATTICE_WIDTH + 4, LATTICE_HEIGHT + 4);
+  ctx.setTransform(
+    CANVAS_RENDER_SCALE,
+    0,
+    0,
+    CANVAS_RENDER_SCALE,
+    -LATTICE_X * CANVAS_RENDER_SCALE,
+    -LATTICE_Y * CANVAS_RENDER_SCALE,
+  );
+  ctx.clearRect(LATTICE_X, LATTICE_Y, LATTICE_WIDTH, LATTICE_HEIGHT);
   ctx.save();
   roundedRect(ctx, LATTICE_X, LATTICE_Y, LATTICE_WIDTH, LATTICE_HEIGHT, 14);
   ctx.clip();
@@ -898,9 +907,7 @@ function drawParticleLayer(ctx, state) {
 
 function drawGraphLayer(ctx, state) {
   prepareLayer(ctx);
-  for (const panel of [PROFILE_PANEL, FLOW_PANEL]) {
-    ctx.clearRect(panel.x, panel.y, panel.width, panel.height);
-  }
+  ctx.clearRect(0, 0, WIDTH, HEIGHT);
   drawProfilePanel(ctx, state);
   drawFlowPanel(ctx, state);
 }
@@ -1195,9 +1202,9 @@ export default function App() {
             />
             <canvas
               ref={particleCanvasRef}
-              width={WIDTH * CANVAS_RENDER_SCALE}
-              height={HEIGHT * CANVAS_RENDER_SCALE}
-              className="fs-stage-layer"
+              width={LATTICE_WIDTH * CANVAS_RENDER_SCALE}
+              height={LATTICE_HEIGHT * CANVAS_RENDER_SCALE}
+              className="fs-particle-layer"
               aria-hidden="true"
             />
             <canvas
@@ -1410,6 +1417,16 @@ const layoutCss = `
     display: block;
     width: 100%;
     height: 100%;
+    pointer-events: none;
+  }
+
+  .fs-particle-layer {
+    position: absolute;
+    left: ${pct(LATTICE_X, WIDTH)};
+    top: ${pct(LATTICE_Y, HEIGHT)};
+    width: ${pct(LATTICE_WIDTH, WIDTH)};
+    height: ${pct(LATTICE_HEIGHT, HEIGHT)};
+    display: block;
     pointer-events: none;
   }
 
